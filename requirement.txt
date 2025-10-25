@@ -1,0 +1,7 @@
+streamlit
+groq
+crewai
+pdfminer.six
+python-docx
+altair
+pandas
