@@ -1,14 +1,13 @@
 import os
 import re
-import time
 import torch
 import tempfile
 import pdfplumber
 import docx
 import asyncio
-import json
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer, util
+import time
 
 # ============================================================
 # 🚀 1. Load Fine-Tuned Hugging Face Model (Optimized for CPU)
@@ -22,63 +21,47 @@ embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model.to(device)
-model.eval()
-torch.set_num_threads(4)
+model.eval()  # ✅ Important: disable dropout for inference
 print(f"✅ [INIT] Model loaded successfully on: {device.upper()}")
 
 # ============================================================
-# 🧠 2. Text Generation (Fast, JSON-safe, CPU Optimized)
+# 🧠 2. Safe Text Generation with Debugging + CPU Optimizations
 # ============================================================
-def hf_generate(prompt: str, max_new_tokens: int = 64) -> str:
-    """Generate text efficiently using your fine-tuned model."""
-    print("\n⚡ [GENERATION] Generating text...")
-    start = time.time()
+def hf_generate(prompt: str, max_new_tokens: int = 128) -> str:
+    """Generate text using your fine-tuned Gemma model safely and fast."""
+    print("\n⚡ [GENERATION] Generating text from model...")
+    start_time = time.time()
+
+    # Use inference mode for speed
     with torch.inference_mode():
         inputs = tokenizer(
             prompt,
             return_tensors="pt",
             truncation=True,
-            max_length=768,
+            max_length=1024,
         ).to(device)
 
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            do_sample=False,  # deterministic = faster + structured
-            temperature=0.5,
-            top_p=0.9,
-            early_stopping=True,
-            use_cache=True,
+            temperature=0.7,
+            do_sample=True,
             pad_token_id=tokenizer.eos_token_id,
         )
 
-    text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    print(f"✅ [GENERATION DONE] Took {round(time.time()-start, 2)}s, Output: {len(text)} chars\n")
-    return text.strip()
+        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    elapsed = round(time.time() - start_time, 2)
+    print(f"✅ [GENERATION DONE] Took {elapsed}s, Output length: {len(generated_text)} chars\n")
+    return generated_text
 
 # ============================================================
-# 🧩 3. Safe JSON Parser (No eval, regex tolerant)
-# ============================================================
-def safe_json_parse(output: str):
-    """Extract valid JSON from model output."""
-    try:
-        return json.loads(output)
-    except Exception:
-        try:
-            match = re.search(r"\{.*\}", output, re.DOTALL)
-            if match:
-                return json.loads(match.group(0))
-        except Exception:
-            pass
-    return {}
-
-# ============================================================
-# 📄 4. File Text Extraction (PDF / DOCX / TXT)
+# 📄 3. File Text Extraction (PDF / DOCX / TXT)
 # ============================================================
 def extract_text(file):
-    """Extract text from uploaded resume or JD."""
+    """Extract text content from resumes and job descriptions."""
     print(f"📂 [EXTRACT] Reading file: {file.name}")
-    start = time.time()
+    start_time = time.time()
     name = file.name.lower()
 
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -88,8 +71,8 @@ def extract_text(file):
     text = ""
     if name.endswith(".pdf"):
         with pdfplumber.open(tmp_path) as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() or ""
+            for p in pdf.pages:
+                text += p.extract_text() or ""
     elif name.endswith(".docx"):
         doc = docx.Document(tmp_path)
         text = "\n".join([p.text for p in doc.paragraphs])
@@ -97,92 +80,84 @@ def extract_text(file):
         text = open(tmp_path, "r", encoding="utf-8").read()
 
     os.remove(tmp_path)
-    print(f"✅ [EXTRACT DONE] {len(text)} chars in {round(time.time()-start, 2)}s\n")
-    return text.strip()[:2000]  # limit for speed
+    print(f"✅ [EXTRACT DONE] {len(text)} characters extracted in {round(time.time() - start_time, 2)}s\n")
+    return text.strip()
 
 # ============================================================
-# ⚙️ 5. Semantic Similarity
+# ⚙️ 4. Helper: Semantic Similarity (for JD vs Resume)
 # ============================================================
 def get_semantic_score(jd_text, resume_text):
-    """Compute similarity between job description and resume."""
-    start = time.time()
+    """Compute cosine similarity score between JD and Resume embeddings."""
+    start_time = time.time()
     jd_emb = embedder.encode(jd_text, convert_to_tensor=True)
     res_emb = embedder.encode(resume_text, convert_to_tensor=True)
     score = round(util.pytorch_cos_sim(jd_emb, res_emb).item() * 100, 2)
-    print(f"📊 [SIMILARITY] Score: {score} ({round(time.time()-start, 2)}s)")
+    print(f"📊 [SIMILARITY] Score: {score} (computed in {round(time.time() - start_time, 2)}s)")
     return score
 
 # ============================================================
-# 🤖 6. Resume Processing Logic
+# 🤖 5. Resume Analysis Functions (Pure Hugging Face)
 # ============================================================
 def analyze_resume(resume_text: str) -> dict:
+    """Extract structured data (skills, education, etc.) from resume."""
     print("🧩 [STEP 1] Analyzing resume content...")
     prompt = f"""
-You are an expert resume parser.
-Return ONLY valid JSON in this format:
-{{
-  "skills": ["Python", "Flask", "Machine Learning"],
-  "experience": "2 years as backend developer",
-  "education": "B.Tech in Computer Science",
-  "achievements": ["Built ML model for fraud detection"]
-}}
-
-Resume Text:
-{resume_text[:1500]}
-"""
-    output = hf_generate(prompt)
-    data = safe_json_parse(output)
-    if not data:
+    Analyze the following resume and return structured JSON with:
+    - skills (technical + soft)
+    - experience summary
+    - education
+    - key achievements
+    Resume Text:
+    {resume_text[:2000]}  # limit for safety
+    """
+    output = hf_generate(prompt, max_new_tokens=128)
+    try:
+        data = eval(output) if isinstance(output, str) else {}
+    except Exception:
         print("⚠️ [ERROR] Failed to parse structured JSON from analysis output.")
         data = {"skills": [], "experience": "", "education": "", "achievements": ""}
     return data
 
 def compare_with_jd(resume_data: dict, jd_text: str) -> dict:
+    """Compare extracted resume data with job description."""
     print("🧩 [STEP 2] Comparing resume with JD...")
-    resume_summary = f"Skills: {resume_data.get('skills')}\nExperience: {resume_data.get('experience')}"
+    resume_text = f"Skills: {resume_data.get('skills')}\nExperience: {resume_data.get('experience')}"
     prompt = f"""
-Compare the resume with the job description.
-Return ONLY valid JSON in this format:
-{{
-  "matched_skills": ["Python", "REST APIs"],
-  "missing_skills": ["Kubernetes", "Docker"],
-  "fit_summary": "Candidate fits 80% of the role, lacking DevOps experience."
-}}
-
-Job Description:
-{jd_text[:1500]}
-
-Resume:
-{resume_summary[:1500]}
-"""
-    output = hf_generate(prompt)
-    data = safe_json_parse(output)
-    if not data:
+    Compare the following resume and job description.
+    Return JSON with:
+    - matched_skills
+    - missing_skills
+    - fit_summary
+    Job Description:
+    {jd_text[:1500]}
+    Resume:
+    {resume_text[:1500]}
+    """
+    output = hf_generate(prompt, max_new_tokens=128)
+    try:
+        data = eval(output) if isinstance(output, str) else {}
+    except Exception:
         print("⚠️ [ERROR] Failed to parse JD comparison JSON.")
         data = {"matched_skills": [], "missing_skills": [], "fit_summary": ""}
     return data
 
 def rank_candidate(jd_text: str, resume_text: str, comparison: dict) -> dict:
+    """Generate a final candidate score and justification."""
     print("🧩 [STEP 3] Ranking candidate...")
     base_score = get_semantic_score(jd_text, resume_text)
     prompt = f"""
-Based on the JD and comparison, give a final evaluation.
-Return ONLY valid JSON in this format:
-{{
-  "overall_score": 87,
-  "summary": "Strong backend developer with Python and API experience.",
-  "justification": "Matches most JD requirements except Kubernetes."
-}}
-
-Job Description:
-{jd_text[:800]}
-
-Comparison:
-{comparison}
-"""
-    output = hf_generate(prompt)
-    data = safe_json_parse(output)
-    if not data:
+    Based on this job description and resume comparison:
+    JD: {jd_text[:1500]}
+    Comparison: {comparison}
+    Provide JSON with:
+    - overall_score (0-100)
+    - summary
+    - justification
+    """
+    output = hf_generate(prompt, max_new_tokens=64)
+    try:
+        data = eval(output)
+    except Exception:
         print("⚠️ [ERROR] Failed to parse ranking JSON, fallback to defaults.")
         data = {"overall_score": base_score, "summary": output, "justification": "Auto-generated."}
     data["overall_score"] = data.get("overall_score", base_score)
@@ -190,19 +165,19 @@ Comparison:
     return data
 
 # ============================================================
-# 🧩 7. Process Each Resume
+# 🧩 6. Process Each Resume
 # ============================================================
 async def process_resume(jd_text, resume_file):
     resume_name = resume_file.name
     print(f"\n📄 [PROCESS] Starting analysis for: {resume_name}")
-    start = time.time()
+    start_time = time.time()
 
     resume_text = extract_text(resume_file)
     resume_data = analyze_resume(resume_text)
     comparison = compare_with_jd(resume_data, jd_text)
     result = rank_candidate(jd_text, resume_text, comparison)
 
-    elapsed = round(time.time() - start, 2)
+    elapsed = round(time.time() - start_time, 2)
     print(f"✅ [PROCESS DONE] {resume_name} analyzed in {elapsed}s\n")
 
     return {
@@ -219,25 +194,25 @@ async def process_resume(jd_text, resume_file):
     }
 
 # ============================================================
-# ⚡ 8. Async Ranking for Multiple Resumes (CPU Safe)
+# ⚡ 7. Async Ranking for Multiple Resumes (Sequential CPU Safe)
 # ============================================================
 async def rank_resumes(jd_text, resume_files):
-    """Sequential processing to prevent CPU overload."""
+    """Process resumes sequentially (CPU-optimized + debug logs)."""
     print("\n🚀 [SYSTEM] Starting Resume Ranking Process...")
     results = []
     for i, file in enumerate(resume_files, start=1):
-        print("==============================")
+        print(f"==============================")
         print(f"⚙️ [{i}/{len(resume_files)}] Processing: {file.name}")
-        print("==============================")
+        print(f"==============================")
         result = await process_resume(jd_text, file)
         results.append(result)
         if device == "cuda":
-            torch.cuda.empty_cache()
+            torch.cuda.empty_cache()  # free VRAM
     print("\n✅ [SYSTEM] All resumes processed successfully.\n")
     return results
 
 # ============================================================
-# 🧪 9. CLI Test
+# 🧪 8. CLI Test
 # ============================================================
 if __name__ == "__main__":
-    print("✅ Backend ready: Hugging Face only (Fast JSON Parsing + CPU optimized).")
+    print("✅ Backend ready: Hugging Face only (Debug + CPU optimized).")

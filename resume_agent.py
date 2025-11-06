@@ -1,24 +1,34 @@
-import json, re, asyncio, numpy as np
+# --- 1. THIS IS THE NEW ENVIRONMENT FIX ---
+import os
+# Use .pop() to completely remove the keys if they exist
+os.environ.pop("OPENAI_API_KEY", None)
+os.environ.pop("OPENAI_API_BASE", None)
+os.environ.pop("OPENAI_MODEL_NAME", None)
+# ----------------------------------------
+
+import json
+import re
+import asyncio
+import numpy as np
 from pdfminer.high_level import extract_text
 from docx import Document
-from sklearn.metrics import (
-    r2_score, f1_score, precision_score, recall_score,
-    accuracy_score, mean_absolute_error, mean_squared_error
-)
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 from transformers import AutoTokenizer, pipeline
-from crewai import Agent, Task, Crew
+from crewai import Agent, Task, Crew, Process  # Make sure Process is imported
 
 # -----------------------------
 # HUGGING FACE MODEL CONFIG
 # -----------------------------
-# MODEL_ID = "kirankumarpetlu/Fine_Tunned_LLM"
-MODEL_ID="google/gemma-2b-it"
- 
+MODEL_ID = "kirankumarpetlu/Fine_Tunned_LLM"
+# MODEL_ID="google/gemma-2b-it"
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
-pipe = pipeline("text-generation", model=MODEL_ID, token=token,tokenizer=tokenizer, trust_remote_code=True)
+
+pipe = pipeline(
+    "text-generation", 
+    model=MODEL_ID, 
+    tokenizer=tokenizer, 
+    trust_remote_code=True
+)
 
 def hf_call(prompt: str) -> str:
     """Generate output using your fine-tuned Hugging Face model."""
@@ -30,21 +40,50 @@ def hf_call(prompt: str) -> str:
             temperature=0.4,
             top_p=0.9,
         )
-        return outputs[0]["generated_text"].strip()
+        full_text = outputs[0]["generated_text"].strip()
+        
+        if full_text.startswith(prompt):
+            return full_text[len(prompt):].strip()
+        else:
+            return full_text
+
     except Exception as e:
+        print(f"[ERROR in hf_call] {e}")
         return f"[ERROR] {e}"
 
+# -----------------------------
+# JSON EXTRACTOR
+# -----------------------------
 def extract_json(text):
     """Extract JSON safely from model output."""
     if not text:
         return {}
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
+    
+    try:
+        start_index = text.find('{')
+        if start_index == -1:
+            print("--- DEBUG: extract_json --- NO '{' found in text.")
             return {}
-    return {}
+        
+        end_index = text.rfind('}')
+        if end_index == -1:
+            print("--- DEBUG: extract_json --- NO '}' found in text.")
+            return {}
+
+        if end_index < start_index:
+            print("--- DEBUG: extract_json --- '}' found before '{'. Invalid structure.")
+            return {}
+
+        json_str = text[start_index : end_index + 1]
+        return json.loads(json_str)
+    
+    except json.JSONDecodeError as e:
+        print(f"--- DEBUG: extract_json --- JSONDecodeError: {e}")
+        print(f"--- FAILED ON STRING (first 200 chars): {json_str[:200]}...")
+        return {}
+    except Exception as e:
+        print(f"--- DEBUG: extract_json --- An unexpected error occurred: {e}")
+        return {}
 
 # -----------------------------
 # FILE PARSING HELPERS
@@ -65,146 +104,189 @@ def parse_resume_file(upload_file):
 
 # -----------------------------
 # CREWAI AGENTS
+# --- 2. THIS IS THE NEW AGENT FIX ---
 # -----------------------------
 parser_agent = Agent(
     role="Resume Parser",
     goal="Extract structured resume data such as skills, education, and experience.",
-    backstory="Specialist in extracting structured information from resumes.",
+    backstory="Specialist in extracting structured information from resumes. You only output valid JSON.",
     llm=hf_call,
-)
-
-skill_agent = Agent(
-    role="Skill Extractor",
-    goal="Identify technical and soft skills along with proficiency levels.",
-    backstory="Understands domains and can assess skill categories.",
-    llm=hf_call,
+    allow_delegation=False,
+    verbose=True,
+    fallback_llm=None  # <-- EXPLICITLY DISABLE FALLBACK
 )
 
 proficiency_agent = Agent(
     role="Proficiency Justifier",
     goal="Provide justifications for each skill's proficiency using project or experience details.",
-    backstory="Analyzes work experience to justify skill levels with reasoning.",
+    backstory="Analyzes work experience to justify skill levels with reasoning. You only output valid JSON.",
     llm=hf_call,
+    allow_delegation=False,
+    verbose=True,
+    fallback_llm=None  # <-- EXPLICITLY DISABLE FALLBACK
 )
 
 matcher_agent = Agent(
     role="Job Matcher",
     goal="Compare resume skills with job description and identify matches, gaps, and overall fit.",
-    backstory="Experienced recruiter comparing candidates with job roles.",
+    backstory="Experienced recruiter comparing candidates with job roles. You only output valid JSON.",
     llm=hf_call,
+    allow_delegation=False,
+    verbose=True,
+    fallback_llm=None  # <-- EXPLICITLY DISABLE FALLBACK
 )
 
 ranker_agent = Agent(
     role="Ranker Agent",
-    goal="Compute overall candidate score and justification summary.",
-    backstory="Senior analyst evaluating skill depth and job relevance.",
+    goal="Compute overall candidate score and justification summary, and aggregate all data into a single JSON.",
+    backstory="Senior analyst evaluating skill depth and job relevance, responsible for the final candidate report. You only output valid JSON.",
     llm=hf_call,
-)
-
-# -----------------------------
-# CREW SETUP
-# -----------------------------
-crew = Crew(
-    agents=[parser_agent, skill_agent, proficiency_agent, matcher_agent, ranker_agent]
+    allow_delegation=False,
+    verbose=True,
+    fallback_llm=None  # <-- EXPLICITLY DISABLE FALLBACK
 )
 
 # -----------------------------
 # TASK PIPELINE
 # -----------------------------
-def analyze_resume_with_crew(jd_text, resume_text):
-    """Run full CrewAI pipeline for a single resume."""
-    parser_task = Task(
-        description=f"Parse resume into structured JSON.\nResume:\n{resume_text[:3000]}",
-        agent=parser_agent,
-    )
+def analyze_resume_with_crew(jd_text, resume_text, resume_name):
+    """Run full CrewAI pipeline for a single resume using .kickoff()"""
+    
+    print(f"\n--- 🚀 Starting Analysis for: {resume_name} ---")
 
-    skill_task = Task(
-        description=f"Extract all skills and proficiencies.\nResume:\n{resume_text[:3000]}",
-        agent=skill_agent,
-        depends_on=[parser_task],
-    )
-
-    proficiency_task = Task(
-        description=f"Justify each skill's proficiency based on projects.\nResume:\n{resume_text[:3000]}\nSkills:\n{skill_task.output}",
-        agent=proficiency_agent,
-        depends_on=[skill_task],
-    )
-
-    matcher_task = Task(
-        description=f"Match skills against job description.\nJob Description:\n{jd_text[:3000]}\nResume:\n{resume_text[:3000]}",
-        agent=matcher_agent,
-        depends_on=[proficiency_task],
-    )
-
-    ranker_task = Task(
-        description=f"Generate overall score and reasoning summary.\nMatching Results:\n{matcher_task.output}",
-        agent=ranker_agent,
-        depends_on=[matcher_task],
-    )
-
-    result = crew.run([parser_task, skill_task, proficiency_task, matcher_task, ranker_task])
-    return result
-
-# -----------------------------
-# METRICS CALCULATION
-# -----------------------------
-def compute_metrics(results, jd_text=""):
-    if not results:
-        return {}
-
-    y_pred = np.array([r.get("overall_score", 0) for r in results])
-    y_true = np.linspace(100, 50, len(y_pred))
-
-    metrics = {
-        "R2": round(r2_score(y_true, y_pred), 3),
-        "MAE": round(mean_absolute_error(y_true, y_pred), 3),
-        "RMSE": round(np.sqrt(mean_squared_error(y_true, y_pred)), 3),
-    }
-
-    y_true_bin = (y_true >= 70).astype(int)
-    y_pred_bin = (y_pred >= 70).astype(int)
-    metrics.update({
-        "Accuracy": round(accuracy_score(y_true_bin, y_pred_bin), 3),
-        "F1": round(f1_score(y_true_bin, y_pred_bin, zero_division=0), 3),
-        "Precision": round(precision_score(y_true_bin, y_pred_bin, zero_division=0), 3),
-        "Recall": round(recall_score(y_true_bin, y_pred_bin, zero_division=0), 3),
-    })
-
-    # Skill similarity
-    matched = [" ".join(r.get("matched_skills", [])) for r in results]
-    missing = [" ".join(r.get("missing_skills", [])) for r in results]
     try:
-        vec = TfidfVectorizer().fit(matched + missing + [jd_text])
-        skill_sim = cosine_similarity(vec.transform(matched), vec.transform([jd_text])).mean()
-        metrics["TFIDF_Skill_Similarity"] = round(float(skill_sim), 3)
-    except Exception:
-        metrics["TFIDF_Skill_Similarity"] = 0.0
+        # --- Task 1: Parse Resume ---
+        parser_task = Task(
+            description=f"""
+            Analyze the following resume and extract the information as a JSON object.
+            ONLY output a single, valid JSON object. Do not add any conversational text.
+            Resume:
+            {resume_text[:3000]}
+            """,
+            agent=parser_agent,
+            expected_output="A structured JSON with keys: 'name', 'summary', 'technical_skills', 'soft_skills', 'experience', 'education'."
+        )
 
-    # Semantic similarity
-    summaries = [r.get("summary", "") for r in results if r.get("summary")]
-    try:
-        vec = TfidfVectorizer().fit([jd_text] + summaries)
-        sims = cosine_similarity(vec.transform([jd_text]), vec.transform(summaries))
-        metrics["Semantic_Job_Resume_Similarity"] = round(float(np.mean(sims)), 3)
-    except Exception:
-        metrics["Semantic_Job_Resume_Similarity"] = 0.0
+        # --- Task 2: Skill Proficiency ---
+        proficiency_task = Task(
+            description=f"""
+            Based on the parsed resume context from the previous task, justify the 
+            proficiency for each skill found.
+            ONLY output a single, valid JSON object with a single key 'skills_proficiency_details'.
+            Do not add any conversational text.
+            """,
+            agent=proficiency_agent,
+            expected_output="A JSON object with a single key 'skills_proficiency_details'. Example: {'skills_proficiency_details': [{'skill': 'Python', 'justification': 'Used in project X...'}, ...]}",
+            context=[parser_task] 
+        )
 
-    metrics["Overall_Evaluation_Score"] = round(
-        0.4 * (1 - metrics["MAE"] / 100)
-        + 0.3 * metrics["TFIDF_Skill_Similarity"]
-        + 0.3 * metrics["Semantic_Job_Resume_Similarity"],
-        3,
-    )
-    return metrics
+        # --- Task 3: Job Matcher ---
+        matcher_task = Task(
+            description=f"""
+            Using the parsed skills from the first task's context, match them 
+            against the job description.
+            ONLY output a single, valid JSON object with 'matched_skills' and 'missing_skills'.
+            Job Description:
+            {jd_text[:3000]}
+            Resume:
+            {resume_text[:3000]}
+            """,
+            agent=matcher_agent,
+            expected_output="A JSON object with 'matched_skills' (list) and 'missing_skills' (list).",
+            context=[parser_task] 
+        )
+
+        # --- Task 4: Final Ranker & Aggregator ---
+        ranker_task = Task(
+            description=f"""
+            You are the final agent. You must aggregate all information from the previous tasks
+            (parsed resume, skill justifications, and job matching results) into a
+            single, comprehensive JSON object.
+            
+            Calculate an 'overall_score' (0-100), write a 'summary', and a 'justification'
+            based on the matching results.
+            
+            ONLY output a single, final JSON object that includes *all* of the following keys:
+            'technical_skills', 'soft_skills', 'experience', 'education',
+            'skills_proficiency_details', 'matched_skills', 'missing_skills',
+            'overall_score', 'summary', 'justification'.
+            """,
+            agent=ranker_agent,
+            expected_output="A single, final JSON object containing all specified keys.",
+            context=[parser_task, proficiency_task, matcher_task] 
+        )
+
+        # --- Create Crew and Kickoff ---
+        crew = Crew(
+            agents=[parser_agent, proficiency_agent, matcher_agent, ranker_agent],
+            tasks=[parser_task, proficiency_task, matcher_task, ranker_task],
+            verbose=True,
+            process=Process.sequential  # This ensures no manager_llm is needed
+        )
+        
+        final_result_string = crew.kickoff()
+        
+        print(f"--- DEBUG: RAW Output from final (ranker) agent for {resume_name} ---")
+        print(final_result_string)
+        print("-----------------------------------------------------------")
+
+        task_outputs = extract_json(final_result_string)
+        task_outputs['resume_name'] = resume_name
+        
+        expected_keys = [
+            'resume_name', 'overall_score', 'summary', 'justification', 
+            'matched_skills', 'missing_skills', 'skills_proficiency_details',
+            'technical_skills', 'soft_skills', 'experience', 'education'
+        ]
+        for key in expected_keys:
+            if key not in task_outputs:
+                if key == 'overall_score':
+                    task_outputs[key] = 0
+                elif key in ['summary', 'justification', 'resume_name']:
+                    task_outputs[key] = "N/A" if key != 'resume_name' else resume_name
+                else:
+                    task_outputs[key] = [] 
+
+        print(f"--- DEBUG: Final processed JSON for {resume_name} ---")
+        print(task_outputs)
+        print("-----------------------------------------------------")
+        
+        return task_outputs
+
+    except Exception as e:
+        print(f"--- ERROR: Unhandled exception in analyze_resume_with_crew for {resume_name}: {e}")
+        return {
+            "resume_name": resume_name,
+            "overall_score": 0,
+            "summary": "Error during analysis.",
+            "justification": str(e), 
+            "matched_skills": [],
+            "missing_skills": [],
+            "skills_proficiency_details": [],
+            "technical_skills": [],
+            "soft_skills": [],
+            "experience": [],
+            "education": []
+        }
 
 # -----------------------------
 # ASYNC MULTI-RESUME HANDLER
 # -----------------------------
 async def rank_resumes(jd_text, upload_files):
+    """
+    Parses and ranks multiple resumes against a job description.
+    """
     tasks = []
     for f in upload_files:
+        resume_name = getattr(f, "name", "unknown_resume")
         resume_text = parse_resume_file(f)
-        tasks.append(asyncio.to_thread(analyze_resume_with_crew, jd_text, resume_text))
+        
+        if not resume_text:
+            print(f"--- SKIPPING {resume_name}, could not parse text. ---")
+            continue
+            
+        tasks.append(asyncio.to_thread(analyze_resume_with_crew, jd_text, resume_text, resume_name))
+    
     results = await asyncio.gather(*tasks)
-    metrics = compute_metrics(results, jd_text)
-    return {"results": results, "metrics": metrics}
+    
+    return results
