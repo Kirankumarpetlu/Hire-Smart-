@@ -2,7 +2,7 @@ import streamlit as st
 import asyncio
 import json
 import pandas as pd
-from resume_agent_test import rank_resumes
+from resume_agent_test1 import rank_resumes
 from pdfminer.high_level import extract_text
 from docx import Document
 
@@ -123,30 +123,30 @@ if st.button("🚀 Analyze & Rank Candidates"):
                 st.write(res.get("skills_proficiency_details", []))
                 
                 # <<< --- ADD THIS ENTIRE NEW SECTION --- >>>
-                st.markdown("---") # Visual separator
+                # st.markdown("---") # Visual separator
                 
-                st.markdown(f"### 🔎 Agent-Parsed Details for: {res['resume_name']}")
+                # st.markdown(f"### 🔎 Agent-Parsed Details for: {res['resume_name']}")
                 
-                tab1, tab2, tab3, tab4 = st.tabs(["Skills", "Experience", "Education", "Full JSON"])
+                # tab1, tab2, tab3, tab4 = st.tabs(["Skills", "Experience", "Education", "Full JSON"])
 
-                with tab1:
-                    st.markdown("#### Technical Skills")
-                    st.write(res.get("technical_skills", []))
-                    st.markdown("#### Soft Skills")
-                    st.write(res.get("soft_skills", []))
+                # with tab1:
+                #     st.markdown("#### Technical Skills")
+                #     st.write(res.get("technical_skills", []))
+                #     st.markdown("#### Soft Skills")
+                #     st.write(res.get("soft_skills", []))
                 
-                with tab2:
-                    st.markdown("#### Parsed Experience")
-                    st.write(res.get("experience", []))
+                # with tab2:
+                #     st.markdown("#### Parsed Experience")
+                #     st.write(res.get("experience", []))
                 
-                with tab3:
-                    st.markdown("#### Parsed Education")
-                    st.write(res.get("education", []))
+                # with tab3:
+                #     st.markdown("#### Parsed Education")
+                #     st.write(res.get("education", []))
                 
-                with tab4:
-                    st.markdown("#### Full Analyzed JSON")
-                    st.json(res)
-                # <<< --- END OF NEW SECTION --- >>>
+                # with tab4:
+                #     st.markdown("#### Full Analyzed JSON")
+                #     st.json(res)
+                # # <<< --- END OF NEW SECTION --- >>>
                 
         # ==============================
         # Optional Chart Visualization
